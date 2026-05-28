@@ -1,14 +1,17 @@
-
 name: Automated Xray Config Pipeline
 
 on:
   schedule:
-    - cron: '0 */6 * * *' # اجرای خودکار اسکن هر ۶ ساعت یک‌بار
-  workflow_dispatch: # امکان اجرای دستی پایپ‌لاین از پنل گیت‌هاب اکشنز
+    - cron: '0 */6 * * *' # اجرای خودکار هر ۶ ساعت
+  workflow_dispatch: # امکان اجرای دستی
 
 jobs:
   validate-and-optimize:
     runs-on: ubuntu-latest
+    
+    # دادن دسترسی به گیت‌هاب اکشنز برای آپدیت کردن و Push کردن فایل‌ها در ریپازیتوری شما
+    permissions:
+      contents: write
 
     steps:
     - name: Checkout Repository Code
@@ -21,13 +24,21 @@ jobs:
 
     - name: Install Network Core Component (Xray)
       run: |
-        # دریافت مستقیم آخرین پکیج پایدار نسخه لینوکس ۶۴ بیت
         wget https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
         unzip Xray-linux-64.zip -d xray-core
         chmod +x xray-core/xray
         mv xray-core/xray ./xray
-        # پاک‌سازی فایل‌های فشرده مبدا جهت مدیریت بهینه فضا
         rm -rf xray-core Xray-linux-64.zip
 
     - name: Execute Proxy Analysis Script
       run: python -u proxy_pipeline.py
+
+    # --- بخش جدید: ذخیره و ارسال تغییرات به ریپازیتوری شما ---
+    - name: Commit and Push Verified Configs
+      run: |
+        git config --local user.email "github-actions[bot]@users.noreply.github.com"
+        git config --local user.name "github-actions[bot]"
+        git add best_configs.txt
+        # اگر تغییری وجود داشت کامیت می‌کند، در غیر این صورت بدون خطا عبور می‌کند
+        git commit -m "Update: Top speed-tested configurations [skip ci]" || echo "No changes to commit"
+        git push
