@@ -84,7 +84,7 @@ def fetch_configs(urls):
                 raw_configs.extend(found)
         except Exception as e:
             pass
-        # نمایش پیشرفت مرحله دانلود
+            
         if idx % 5 == 0 or idx == total_urls:
             print(f"[+] Fetching Subscriptions... {((idx/total_urls)*100):.1f}% Done ({idx}/{total_urls})")
             
@@ -160,7 +160,6 @@ async def filter_live_hosts(parsed_configs):
         await asyncio.gather(*(check(item) for item in chunk))
         processed += len(chunk)
         
-        # نمایش درصد پیشرفت تست TCP
         percentage = (processed / total) * 100
         print(f"[+] TCP Port Testing... {percentage:.1f}% Done ({processed}/{total})")
         
@@ -305,9 +304,7 @@ async def main_pipeline():
         res = await test_xray_latency(item, port_idx, semaphore)
         await port_pool.put(port_idx)
         
-        # سیستم مانیتورینگ درصد پیشرفت تست سرعت Xray
         processed_xray += 1
-        # گزارش‌دهی در گام‌های معین (هر ۵ درصد) برای جلوگیری از شلوغی بیش از حد لاگ‌ها
         log_interval = max(1, total_xray // 20)
         if processed_xray % log_interval == 0 or processed_xray == total_xray:
             percentage = (processed_xray / total_xray) * 100
