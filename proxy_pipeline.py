@@ -51,16 +51,14 @@ SUBSCRIPTION_URLS = [
     "https://raw.githubusercontent.com/gfpcom/free-proxy-list/refs/heads/main/list/vless.txt"
 ]
 
-# --- تنظیمات پایپ‌لاین ---
 MAX_PROCESS_LIMIT = 30000  
 FINAL_OUTPUT_COUNT = 500   
 TIMEOUT_TCP = 2.5          
 TIMEOUT_XRAY = 5.0         
-CONCURRENT_TESTS = 35      
+CONCURRENT_TESTS = 30      
 TEST_URL = "http://cp.cloudflare.com"
 
 def fetch_configs(urls):
-    """جمع‌آوری هوشمند و استخراج کانفیگ‌ها از انواع فرمت‌ها"""
     raw_configs = []
     vless_regex = re.compile(r'vless://[^\s"<]+')
     total_urls = len(urls)
@@ -82,7 +80,7 @@ def fetch_configs(urls):
                 
                 found = vless_regex.findall(content)
                 raw_configs.extend(found)
-        except Exception as e:
+        except:
             pass
             
         if idx % 5 == 0 or idx == total_urls:
@@ -91,7 +89,6 @@ def fetch_configs(urls):
     return raw_configs
 
 def parse_and_filter_vless(configs):
-    """پاک‌سازی، حذف تکراری‌ها و فیلتر کردن کانفیگ‌های VLESS بر پایه Reality یا TLS"""
     unique_configs = list(set(configs))
     valid_configs = []
     
@@ -105,11 +102,20 @@ def parse_and_filter_vless(configs):
                 content, _ = content.split("#", 1)
             if "@" not in content:
                 continue
-            _, rest = content.split("@", 1)
+            uuid, rest = content.split("@", 1)
             
             query_str = rest.split("?", 1)[1] if "?" in rest else ""
             query = parse_qs(query_str)
+            
+            # فیلتر هوشمند بر اساس پارامترهای امنیتی موجود
             security = query.get('security', [''])[0].lower()
+            sni = query.get('sni', [''])[0]
+            pbk = query.get('pbk', [''])[0]
+            
+            # اگر سکیوریتی ذکر نشده اما sni یا pbk دارد، نوع آن را حدس می‌زنیم
+            if not security:
+                if pbk: security = 'reality'
+                elif sni: security = 'tls'
             
             if security in ['tls', 'reality']:
                 host_port = rest.split("?", 1)[0]
@@ -117,7 +123,8 @@ def parse_and_filter_vless(configs):
                 port = int(host_port.split(":")[1]) if ":" in host_port else 443
                 
                 params = {k: v[0] for k, v in query.items()}
-                uuid = conf[8:].split("@")[0]
+                # اصلاح پارامترهای سکیوریتی شناسایی شده
+                params['security'] = security
                 
                 valid_configs.append({
                     'raw': conf,
@@ -132,7 +139,6 @@ def parse_and_filter_vless(configs):
     return valid_configs[:MAX_PROCESS_LIMIT]
 
 async def tcp_ping(host, port):
-    """تست سریع در سطح لایه انتقال (TCP)"""
     try:
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(host, port), 
@@ -145,31 +151,31 @@ async def tcp_ping(host, port):
         return False
 
 async def filter_live_hosts(parsed_configs):
-    """اجرای دسته‌ای تست TCP همراه با گزارش درصد پیشرفت"""
     live_configs = []
     total = len(parsed_configs)
+    if total == 0:
+        return live_configs
+        
     processed = 0
     
     async def check(item):
         if await tcp_ping(item['host'], item['port']):
             live_configs.append(item)
             
-    chunk_size = 2000
+    chunk_size = 1000
     for i in range(0, total, chunk_size):
         chunk = parsed_configs[i:i+chunk_size]
         await asyncio.gather(*(check(item) for item in chunk))
         processed += len(chunk)
-        
-        percentage = (processed / total) * 100
-        print(f"[+] TCP Port Testing... {percentage:.1f}% Done ({processed}/{total})")
+        print(f"[+] TCP Port Testing... {((processed / total) * 100):.1f}% Done ({processed}/{total})")
         
     return live_configs
 
 def generate_xray_outbound(item):
-    """نگاشت مشخصات سورس به ساختار استاندارد Outbound در Xray"""
+    """تولید کانفیگ کاملاً بهینه و بدون نقص برای جلوگیری از کرش سورس Xray"""
     p = item['params']
     security = p.get('security', 'none')
-    network = p.get('type', 'tcp')
+    network = p.get('type', 'tcp').lower()
     
     outbound = {
         "protocol": "vless",
@@ -179,8 +185,7 @@ def generate_xray_outbound(item):
                 "port": item['port'],
                 "users": [{
                     "id": item['uuid'],
-                    "encryption": "none",
-                    "flow": p.get('flow', '')
+                    "encryption": "none"
                 }]
             }]
         },
@@ -190,16 +195,20 @@ def generate_xray_outbound(item):
         }
     }
     
+    # اضافه کردن فلو فقط در صورت معتبر بودن الزامات Xray
+    flow = p.get('flow', '').lower()
+    if flow in ['xtls-rprx-vision', 'xtls-rprx-vision-udp443']:
+        outbound["settings"]["vnext"][0]["users"][0]["flow"] = flow
+
     if network == "ws":
-        outbound["streamSettings"]["wsSettings"] = {
-            "path": p.get('path', '/'),
-            "headers": {"Host": p.get('host', item['host'])}
-        }
+        ws_settings = {}
+        if 'path' in p: ws_settings["path"] = p['path']
+        if 'host' in p: ws_settings["headers"] = {"Host": p['host']}
+        outbound["streamSettings"]["wsSettings"] = ws_settings
     elif network == "grpc":
-        outbound["streamSettings"]["grpcSettings"] = {
-            "serviceName": p.get('serviceName', '')
-        }
-        
+        if 'serviceName' in p:
+            outbound["streamSettings"]["grpcSettings"] = {"serviceName": p['serviceName']}
+            
     if security == "reality":
         outbound["streamSettings"]["realitySettings"] = {
             "show": False,
@@ -216,8 +225,7 @@ def generate_xray_outbound(item):
         
     return outbound
 
-async def test_xray_latency(item, port_index, semaphore):
-    """تست عمیق پینگ از طریق ایجاد تونل‌های موقت Xray"""
+async def test_xray_latency(item, port_index, semaphore, diagnostic_mode=False):
     async with semaphore:
         local_socks_port = 11000 + port_index
         config_filename = f"config_temp_{local_socks_port}.json"
@@ -239,12 +247,23 @@ async def test_xray_latency(item, port_index, semaphore):
         proc = None
         latency = float('inf')
         try:
+            # اجرای فرآیند اصلی هسته
             proc = await asyncio.create_subprocess_exec(
                 "./xray", "-c", config_filename,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                stdout=subprocess.PIPE if diagnostic_mode else subprocess.DEVNULL,
+                stderr=subprocess.PIPE if diagnostic_mode else subprocess.DEVNULL
             )
-            await asyncio.sleep(0.35) 
             
+            # زمان انتظار بهبود یافته (0.5 ثانیه) برای اجرای امن پورت در گیت هاب
+            await asyncio.sleep(0.5) 
+            
+            if diagnostic_mode:
+                # بررسی اینکه آیا قبل از انجام تست پورت هسته کرش کرده یا خیر
+                if proc.returncode is not None:
+                    stdout, stderr = await proc.communicate()
+                    print(f"[-] Xray failed to boot Core. Error Log: {stderr.decode()}")
+                    return None
+
             start_time = time.time()
             curl_proc = await asyncio.create_subprocess_exec(
                 "curl", "-x", f"socks5h://127.0.0.1:{local_socks_port}",
@@ -280,14 +299,26 @@ async def main_pipeline():
     raw_list = fetch_configs(SUBSCRIPTION_URLS)
     print(f"[+] Total raw nodes collected: {len(raw_list)}")
     
+    if len(raw_list) == 0:
+        print("[-] Critical Error: 0 nodes downloaded. Subscriptions might be down or format changed.")
+        return
+
     print("[+] Step 2: Running deduplication & Reality/TLS targeted filtering...")
     parsed_configs = parse_and_filter_vless(raw_list)
-    print(f"[+] Total filtered configurations for verification: {len(parsed_configs)}")
+    print(f"[+] Total filtered VLESS configurations (TLS/Reality): {len(parsed_configs)}")
     
+    if len(parsed_configs) == 0:
+        print("[-] Critical Error: 0 nodes matched 'TLS/Reality' structures. Check source formats.")
+        return
+
     print("[+] Step 3: Dispatching asynchronous TCP connection test...")
     alive_targets = await filter_live_hosts(parsed_configs)
     print(f"[+] Nodes passed TCP health-check: {len(alive_targets)}")
     
+    if len(alive_targets) == 0:
+        print("[-] Critical Error: 0 nodes are alive over TCP. Network block or wrong host routing.")
+        return
+
     print("[+] Step 4: Initializing core Xray latency tests...")
     semaphore = asyncio.Semaphore(CONCURRENT_TESTS)
     
@@ -298,10 +329,14 @@ async def main_pipeline():
     total_xray = len(alive_targets)
     processed_xray = 0
     
-    async def worker(item):
+    async def worker(idx_item, item):
         nonlocal processed_xray
+        port_idx = await port_pool.put(idx_item % CONCURRENT_TESTS)
         port_idx = await port_pool.get()
-        res = await test_xray_latency(item, port_idx, semaphore)
+        
+        # مد دیباگ برای اولین گام‌ها جهت بررسی سیستماتیک خطا در صورت شکست اولیه
+        diag = True if idx_item < 2 else False
+        res = await test_xray_latency(item, port_idx, semaphore, diagnostic_mode=diag)
         await port_pool.put(port_idx)
         
         processed_xray += 1
@@ -312,13 +347,17 @@ async def main_pipeline():
             
         return res
 
-    tasks = [worker(item) for item in alive_targets]
+    tasks = [worker(idx, item) for idx, item in enumerate(alive_targets)]
     test_results = await asyncio.gather(*tasks)
     
     successful_tests = [r for r in test_results if r is not None]
     successful_tests.sort(key=lambda x: x['ping'])
     print(f"[+] Speed evaluation complete. Total responsive nodes: {len(successful_tests)}")
     
+    if len(successful_tests) == 0:
+        print("[-] Warning: 0 nodes replied to Xray Core Ping test.")
+        return
+
     top_nodes = successful_tests[:FINAL_OUTPUT_COUNT]
     
     print(f"[+] Committing top {len(top_nodes)} speed-tested configurations to file...")
