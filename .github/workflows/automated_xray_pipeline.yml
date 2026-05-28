@@ -1,9 +1,10 @@
+
 name: Automated Xray Config Pipeline
 
 on:
   schedule:
-    - cron: '0 */6 * * *' # اجرای خودکار اسکن هر ۶ ساعت یک‌بار برای مانیتورینگ مستمر پایداری
-  workflow_dispatch: # امکان اجرای آنی و دستی پایپ‌لاین از پنل گیت‌هاب اکشنز
+    - cron: '0 */6 * * *' # اجرای خودکار اسکن هر ۶ ساعت یک‌بار
+  workflow_dispatch: # امکان اجرای دستی پایپ‌لاین از پنل گیت‌هاب اکشنز
 
 jobs:
   validate-and-optimize:
@@ -25,17 +26,8 @@ jobs:
         unzip Xray-linux-64.zip -d xray-core
         chmod +x xray-core/xray
         mv xray-core/xray ./xray
-        # پاک‌سازی فایل‌های فشرده مبدا جهت مدیریت بهینه فضای دیسک داکر
+        # پاک‌سازی فایل‌های فشرده مبدا جهت مدیریت بهینه فضا
         rm -rf xray-core Xray-linux-64.zip
 
     - name: Execute Proxy Analysis Script
-      run: python proxy_pipeline.py
-
-    - name: Publish and Commit Optimized Output
-      run: |
-        git config --local user.email "github-actions[bot]@users.noreply.github.com"
-        git config --local user.name "GitHub Actions Bot"
-        git add best_configs.txt
-        # کنترل خطا در صورتی که دیتای جدید و قدیم یکسان باشند
-        git commit -m "Automated Sync: Top 500 validated VLESS nodes updated" || echo "No workflow modifications detected."
-        git push
+      run: python -u proxy_pipeline.py
