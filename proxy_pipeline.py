@@ -56,24 +56,23 @@ MAX_PROCESS_LIMIT = 30000
 FINAL_OUTPUT_COUNT = 500   
 TIMEOUT_TCP = 2.5          
 TIMEOUT_XRAY = 5.0         
-CONCURRENT_TESTS = 35      # تعداد پروسه‌های همزمان تست پینگ Xray
+CONCURRENT_TESTS = 35      
 TEST_URL = "http://cp.cloudflare.com"
 
 def fetch_configs(urls):
-    """جمع‌آوری هوشمند و استخراج کانفیگ‌ها از انواع فرمت‌های متنی، Base64 و HTML"""
+    """جمع‌آوری هوشمند و استخراج کانفیگ‌ها از انواع فرمت‌ها"""
     raw_configs = []
     vless_regex = re.compile(r'vless://[^\s"<]+')
+    total_urls = len(urls)
     
-    for url in urls:
+    for idx, url in enumerate(urls, 1):
         try:
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=15) as response:
                 content = response.read().decode('utf-8', errors='ignore').strip()
                 
-                # تشخیص و رمزگشایی خودکار در صورت Base64 بودن کل سورس
                 if content and not any(proto in content for proto in ["vless://", "vmess://", "ss://"]):
                     try:
-                        # اصلاح پدینگ بازمانده در Base64
                         missing_padding = len(content) % 4
                         if missing_padding:
                             content += '=' * (4 - missing_padding)
@@ -81,11 +80,14 @@ def fetch_configs(urls):
                     except:
                         pass
                 
-                # استخراج دقیق تمام عبارات منطبق با الگوی vless
                 found = vless_regex.findall(content)
                 raw_configs.extend(found)
         except Exception as e:
-            print(f"[-] Error fetching from {url}: {e}")
+            pass
+        # نمایش پیشرفت مرحله دانلود
+        if idx % 5 == 0 or idx == total_urls:
+            print(f"[+] Fetching Subscriptions... {((idx/total_urls)*100):.1f}% Done ({idx}/{total_urls})")
+            
     return raw_configs
 
 def parse_and_filter_vless(configs):
@@ -143,22 +145,29 @@ async def tcp_ping(host, port):
         return False
 
 async def filter_live_hosts(parsed_configs):
-    """اجرای دسته‌ای و ناهمگام تست زنده بودن TCP فرستنده‌ها"""
+    """اجرای دسته‌ای تست TCP همراه با گزارش درصد پیشرفت"""
     live_configs = []
+    total = len(parsed_configs)
+    processed = 0
     
     async def check(item):
         if await tcp_ping(item['host'], item['port']):
             live_configs.append(item)
             
     chunk_size = 2000
-    for i in range(0, len(parsed_configs), chunk_size):
+    for i in range(0, total, chunk_size):
         chunk = parsed_configs[i:i+chunk_size]
         await asyncio.gather(*(check(item) for item in chunk))
+        processed += len(chunk)
+        
+        # نمایش درصد پیشرفت تست TCP
+        percentage = (processed / total) * 100
+        print(f"[+] TCP Port Testing... {percentage:.1f}% Done ({processed}/{total})")
         
     return live_configs
 
 def generate_xray_outbound(item):
-    """نگاشت مشخصات سورس به ساختار استاندارد Outbound در معماری هسته Xray"""
+    """نگاشت مشخصات سورس به ساختار استاندارد Outbound در Xray"""
     p = item['params']
     security = p.get('security', 'none')
     network = p.get('type', 'tcp')
@@ -209,7 +218,7 @@ def generate_xray_outbound(item):
     return outbound
 
 async def test_xray_latency(item, port_index, semaphore):
-    """تست عمیق پینگ از طریق ایجاد تونل‌های موقت Xray کور با پورت مجزا"""
+    """تست عمیق پینگ از طریق ایجاد تونل‌های موقت Xray"""
     async with semaphore:
         local_socks_port = 11000 + port_index
         config_filename = f"config_temp_{local_socks_port}.json"
@@ -287,10 +296,23 @@ async def main_pipeline():
     for idx in range(CONCURRENT_TESTS):
         await port_pool.put(idx)
         
+    total_xray = len(alive_targets)
+    processed_xray = 0
+    
     async def worker(item):
+        nonlocal processed_xray
         port_idx = await port_pool.get()
         res = await test_xray_latency(item, port_idx, semaphore)
         await port_pool.put(port_idx)
+        
+        # سیستم مانیتورینگ درصد پیشرفت تست سرعت Xray
+        processed_xray += 1
+        # گزارش‌دهی در گام‌های معین (هر ۵ درصد) برای جلوگیری از شلوغی بیش از حد لاگ‌ها
+        log_interval = max(1, total_xray // 20)
+        if processed_xray % log_interval == 0 or processed_xray == total_xray:
+            percentage = (processed_xray / total_xray) * 100
+            print(f"[+] Xray Speed Testing... {percentage:.1f}% Done ({processed_xray}/{total_xray})")
+            
         return res
 
     tasks = [worker(item) for item in alive_targets]
